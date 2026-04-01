@@ -1,0 +1,42 @@
+# Core Deep Learning
+
+torch>=2.1.0
+torchvision>=0.16.0
+
+# YOLOv8 Framework
+
+#ultralytics>=8.2.0
+
+# Data Handling
+
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Visualization
+
+matplotlib>=3.7.0
+seaborn>=0.13.0
+
+# Progress & Utilities
+
+tqdm>=4.65.0
+PyYAML>=6.0
+
+# Image Processing
+
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Evaluation / Metrics
+
+scikit-learn>=1.3.0
+
+# Optional (Recommended for Research)
+
+tensorboard>=2.14.0
+thop>=0.1.1  # FLOPs computation
+
+# Notebook (for analysis only)
+
+jupyter>=1.0.0
+ipykernel>=6.25.0
