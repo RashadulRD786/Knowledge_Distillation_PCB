@@ -1,4 +1,4 @@
-path: /home/rashadulnafisriyad/PCB_KD_PROJECT/datasets/HRIPCB
+path: /home/rashadulnafisriyad/pcb_kd_project/datasets/HRIPCB
 
 train: train/images
 val: val/images
