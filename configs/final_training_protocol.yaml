@@ -1,0 +1,133 @@
+# ==========================================================
+# FINAL FROZEN TRAINING PROTOCOL
+# DO NOT MODIFY AFTER THIS POINT
+# Used for:
+#   - Teacher
+#   - Baseline Student
+#   - KD Student
+# ==========================================================
+
+# Model
+
+# -------------------------
+
+model: yolov8m/s/n.pt #Change the yolov8 model version here accordingly
+task: detect
+pretrained: True
+
+# -------------------------
+
+# Dataset
+
+# -------------------------
+
+data: data/pcb_defect.yaml
+imgsz: 640
+
+# -------------------------
+
+# Training
+
+# -------------------------
+
+epochs: 200
+batch: 16
+workers: 8
+device: 0
+patience: 50
+
+# -------------------------
+
+# Optimization
+
+# -------------------------
+
+optimizer: SGD
+lr0: 0.01
+lrf: 0.1
+momentum: 0.937
+weight_decay: 0.0005
+cos_lr: True
+
+# -------------------------
+
+# Warmup
+
+# -------------------------
+
+warmup_epochs: 3
+warmup_momentum: 0.8
+warmup_bias_lr: 0.1
+
+# -------------------------
+
+# Loss Weights
+
+# -------------------------
+
+box: 7.5
+cls: 0.5
+dfl: 1.5
+
+# -------------------------
+
+# AUGMENTATION (DISABLED)
+
+# -------------------------
+
+hsv_h: 0.015
+hsv_s: 0.7
+hsv_v: 0.4
+
+fliplr: 0.5
+
+mosaic: 0.5
+mixup: 0.1
+
+# -------------------------
+
+# Validation
+
+# -------------------------
+
+val: True
+plots: True
+save_json: True          # Useful for detailed evaluation
+
+# -------------------------
+
+# Logging / Output
+
+# -------------------------
+
+project: ../experiments/teacher #or baseline
+name: yolov8m/l  #change the name here accordingly
+exist_ok: False
+
+# -------------------------
+
+# Saving
+
+# -------------------------
+
+save: True
+save_period: 20
+
+# -------------------------
+
+# Performance
+
+# -------------------------
+
+amp: True
+cache: False
+verbose: True
+
+# -------------------------
+
+# Reproducibility
+
+# -------------------------
+
+seed: 42
+deterministic: False
