@@ -108,7 +108,7 @@ def evaluate_model(weights_path: str, data_yaml: str, split: str = "test",
     # Warmup runs
     with torch.no_grad():
         for _ in range(50):
-            _ = model.model(dummy)
+            _ = model.predict(dummy, device=device, verbose=False)
     if use_cuda:
         torch.cuda.synchronize(dev)
 
@@ -117,7 +117,7 @@ def evaluate_model(weights_path: str, data_yaml: str, split: str = "test",
     t0 = time.perf_counter()
     with torch.no_grad():
         for _ in range(n_runs):
-            _ = model.model(dummy)
+            _ = model.predict(dummy, device=device, verbose=False)
     if use_cuda:
         torch.cuda.synchronize(dev)
     elapsed = time.perf_counter() - t0
