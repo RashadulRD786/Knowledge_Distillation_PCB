@@ -3,12 +3,13 @@ kd_losses.py — Knowledge Distillation Loss Functions
 =====================================================
 This file contains all the loss functions used in knowledge distillation.
 
-There are two types of KD loss:
+There are three types of KD loss:
   1. logit_kd_loss   : BCE-based distillation between student and teacher class logits
   2. feature_kd_loss : MSE loss between L2-normalized intermediate feature maps
+  3. box_kd_loss     : MSE loss between L2-normalized box regression outputs
 
 The combined loss is assembled in kd_trainer.py:
-  L_total = α * L_det  +  β * L_kd_logit  +  γ * L_feat
+  L_total = α * L_det  +  β * L_kd_logit  +  γ * L_feat  +  δ * L_box
 
 These functions are pure (no model state, no side effects) and easy to test.
 
@@ -157,3 +158,49 @@ def feature_kd_loss(student_feats_adapted: list, teacher_feats: list) -> torch.T
         total_loss = total_loss + scale_loss
 
     return total_loss / num_scales
+
+
+def box_kd_loss(student_boxes: torch.Tensor, teacher_boxes: torch.Tensor) -> torch.Tensor:
+    """
+    Box Regression Distillation Loss (MSE on L2-normalized DFL outputs).
+
+    What this does:
+    ---------------
+    YOLOv8 predicts bounding boxes using Distribution Focal Loss (DFL). For each
+    anchor, it outputs 4 * reg_max values representing probability distributions
+    over discrete offsets for each of the 4 box sides. This loss forces the
+    student's box regression distributions to match the teacher's, directly
+    targeting the localization gap between student and teacher.
+
+    Why L2 normalization:
+    ----------------------
+    Box regression outputs across different anchors vary widely in magnitude.
+    L2 normalization makes the loss focus on the shape of the distribution
+    rather than its absolute scale, leading to more stable gradients.
+
+    Math:
+    -----
+    s_norm = L2_normalize(student_boxes, dim=1)
+    t_norm = L2_normalize(teacher_boxes, dim=1)
+    L_box  = MSE(s_norm, t_norm.detach())
+
+    Args:
+        student_boxes : [B, 4*reg_max, N] — raw DFL box outputs from student
+        teacher_boxes : [B, 4*reg_max, N] — raw DFL box outputs from teacher
+
+    Returns:
+        Scalar loss tensor. Returns 0.0 if shapes are incompatible.
+    """
+    teacher_boxes = teacher_boxes.detach().to(dtype=student_boxes.dtype)
+
+    # Guard: if shapes don't match (e.g. different reg_max), skip box KD
+    if student_boxes.shape != teacher_boxes.shape:
+        return torch.tensor(0.0, device=student_boxes.device, dtype=student_boxes.dtype)
+
+    # L2 normalize along channel dimension (dim=1)
+    s_norm = F.normalize(student_boxes, p=2, dim=1)
+    t_norm = F.normalize(teacher_boxes, p=2, dim=1)
+
+    # Sum over channels (dim=1) then average over batch and spatial dims —
+    # consistent with feature_kd_loss so delta is on the same scale as gamma
+    return F.mse_loss(s_norm, t_norm, reduction='none').sum(dim=1).mean()

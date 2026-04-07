@@ -30,18 +30,20 @@ How it works (one training step):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import tqdm as _tqdm
 
 from ultralytics import YOLO
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.utils import LOGGER
-from ultralytics.utils.torch_utils import de_parallel
+from ultralytics.cfg import DEFAULT_CFG_DICT
 
-from kd_losses import logit_kd_loss, feature_kd_loss
+
+from kd_losses import logit_kd_loss, feature_kd_loss, box_kd_loss
 
 
 def _unwrap_model(model):
     """Safely unwrap a model from DDP/DataParallel wrappers."""
-    return de_parallel(model)
+    return model.module if hasattr(model, "module") else model
 
 
 # =============================================================================
@@ -221,6 +223,154 @@ def _measure_channels(model, layer_indices: list, device, imgsz: int = 640) -> l
 
 
 # =============================================================================
+# _KDCriterionWrapper — wraps v8DetectionLoss to add KD losses
+# =============================================================================
+
+class _KDCriterionWrapper:
+    """
+    Wraps the standard v8DetectionLoss to inject logit and feature KD losses.
+
+    Assigned to model.criterion in _setup_kd() so that Ultralytics' training
+    loop (model.loss → model.criterion) picks it up automatically.
+
+    Loss formula:
+        L_total = α * L_det  +  β * L_logit  +  γ * L_feat
+    """
+
+    def __init__(self, base_criterion, trainer):
+        self._base    = base_criterion
+        self._trainer = trainer
+        self._step    = 0          # counts every forward call
+
+    def __call__(self, preds, batch):
+        trainer = self._trainer
+        self._step += 1
+        log_this_step = (self._step == 1) or (self._step % 50 == 0)
+
+        # ── Diagnostic: write proof-of-call to a file (remove after confirming) ──
+        if self._step <= 3:
+            with open("/tmp/kd_active.txt", "a") as _f:
+                _f.write(f"step={self._step} teacher_logits={trainer._teacher_logits is not None} preds_type={type(trainer._teacher_logits[0]).__name__ if trainer._teacher_logits else 'None'}\n")
+
+        # ── Step 1: Standard YOLO detection loss ─────────────────────────────
+        loss_det, loss_items = self._base(preds, batch)
+
+        if trainer.teacher_model is None or trainer._teacher_logits is None:
+            if log_this_step:
+                _tqdm.write(f"[KD step {self._step}] WARNING: teacher_logits not ready — KD skipped this batch.")
+            return loss_det, loss_items
+
+        kd_loss = torch.tensor(0.0, device=loss_det.device, dtype=loss_det.dtype)
+
+        # ── Step 2: Extract student class logits depending on preds format ────
+        # Ultralytics 8.4.33+: Detect.forward_head returns a dict
+        #   preds = {'boxes': [B,4*reg_max,N], 'scores': [B,nc,N], 'feats': [...]}
+        # Legacy: preds is a list of [B, 4*reg_max+nc, H, W] per scale
+        if isinstance(preds, dict):
+            student_scores = preds.get('scores')   # [B, nc, N] all scales concat
+            neck_feats     = list(preds.get('feats', []))
+            if student_scores is None:
+                return loss_det, loss_items
+            batch_size = student_scores.shape[0]
+
+            # Logit KD: teacher_logits[0] is [B, nc, N] — same shape
+            if trainer.kd_beta > 0 and isinstance(trainer._teacher_logits, list):
+                l_logit = logit_kd_loss(
+                    [student_scores], trainer._teacher_logits, trainer.kd_temperature
+                )
+                kd_loss = kd_loss + trainer.kd_beta * l_logit
+
+            # Box regression KD: distill DFL box outputs [B, 4*reg_max, N]
+            if trainer.kd_delta > 0 and trainer._teacher_boxes is not None:
+                student_boxes = preds.get('boxes')
+                if student_boxes is not None:
+                    l_box   = box_kd_loss(student_boxes, trainer._teacher_boxes)
+                    kd_loss = kd_loss + trainer.kd_delta * l_box
+
+            # Feature KD via neck features from dict
+            student_neck_feats = neck_feats
+
+        elif isinstance(preds, tuple):
+            feats = preds[1]
+            if not isinstance(feats, list) or len(feats) < 3:
+                return loss_det, loss_items
+            batch_size = feats[0].shape[0]
+            student_neck_feats = feats
+
+            if trainer.kd_beta > 0:
+                detect  = _unwrap_model(trainer.model).model[-1]
+                box_ch  = 4 * detect.reg_max
+                nc      = detect.nc
+                t_det   = trainer.teacher_model.model[-1]
+                t_box   = 4 * t_det.reg_max
+                t_nc    = t_det.nc
+                student_cls = [p.split([box_ch, nc], dim=1)[1] for p in feats]
+                teacher_cls = [t.split([t_box, t_nc], dim=1)[1] for t in trainer._teacher_logits]
+                l_logit = logit_kd_loss(student_cls, teacher_cls, trainer.kd_temperature)
+                kd_loss = kd_loss + trainer.kd_beta * l_logit
+
+        elif isinstance(preds, list):
+            if len(preds) < 3:
+                return loss_det, loss_items
+            batch_size = preds[0].shape[0]
+            student_neck_feats = preds
+
+            if trainer.kd_beta > 0:
+                detect  = _unwrap_model(trainer.model).model[-1]
+                box_ch  = 4 * detect.reg_max
+                nc      = detect.nc
+                t_det   = trainer.teacher_model.model[-1]
+                t_box   = 4 * t_det.reg_max
+                t_nc    = t_det.nc
+                student_cls = [p.split([box_ch, nc], dim=1)[1] for p in preds]
+                teacher_cls = [t.split([t_box, t_nc], dim=1)[1] for t in trainer._teacher_logits]
+                l_logit = logit_kd_loss(student_cls, teacher_cls, trainer.kd_temperature)
+                kd_loss = kd_loss + trainer.kd_beta * l_logit
+        else:
+            return loss_det, loss_items
+
+        # ── Step 3: Feature KD loss ───────────────────────────────────────────
+        if (trainer.kd_gamma > 0
+                and trainer.feat_adapter        is not None
+                and trainer._student_extractor  is not None
+                and trainer._teacher_neck_feats is not None):
+
+            s_feats = trainer._student_extractor.get_feats() if trainer._student_extractor else student_neck_feats
+            t_feats = trainer._teacher_neck_feats
+
+            if len(s_feats) == 3 and len(t_feats) == 3:
+                student_adapted = trainer.feat_adapter(s_feats)
+                aligned_teacher = []
+                for s_a, t_f in zip(student_adapted, t_feats):
+                    if s_a.shape[2:] != t_f.shape[2:]:
+                        t_f = F.interpolate(t_f, size=s_a.shape[2:], mode='bilinear', align_corners=False)
+                    aligned_teacher.append(t_f)
+                l_feat  = feature_kd_loss(student_adapted, aligned_teacher)
+                kd_loss = kd_loss + trainer.kd_gamma * l_feat
+
+        # ── Step 4: Scale KD loss to match detection loss aggregation ─────────
+        kd_loss = kd_loss * batch_size
+
+        total_loss = trainer.kd_alpha * loss_det.clone()
+        total_loss[0] = total_loss[0] + kd_loss
+
+        if log_this_step:
+            _tqdm.write(
+                f"[KD step {self._step}] "
+                f"det={loss_det.sum().item():.4f}  "
+                f"kd={kd_loss.item():.4f}  "
+                f"total={total_loss.sum().item():.4f}"
+            )
+
+        return total_loss, loss_items
+
+    def update(self):
+        """Forward update() call if the base criterion supports it."""
+        if hasattr(self._base, 'update'):
+            self._base.update()
+
+
+# =============================================================================
 # KDTrainer
 # =============================================================================
 
@@ -249,6 +399,7 @@ class KDTrainer(DetectionTrainer):
         alpha: float = 0.7,
         beta: float  = 0.2,
         gamma: float = 0.1,
+        delta: float = 0.0,
         temperature: float = 4.0,
         cfg=None,
         overrides: dict = None,
@@ -265,12 +416,13 @@ class KDTrainer(DetectionTrainer):
             cfg           : Ultralytics config (leave None for defaults)
             overrides     : dict of training overrides — model, data, epochs, batch, etc.
         """
-        super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
+        super().__init__(cfg=cfg if cfg is not None else DEFAULT_CFG_DICT, overrides=overrides, _callbacks=_callbacks)
 
         self.teacher_path    = teacher_path
         self.kd_alpha        = alpha
         self.kd_beta         = beta
         self.kd_gamma        = gamma
+        self.kd_delta        = delta
         self.kd_temperature  = temperature
 
         # Initialized in _setup_kd() once device is ready
@@ -285,6 +437,7 @@ class KDTrainer(DetectionTrainer):
         # Cached each batch in preprocess_batch(), consumed in criterion()
         self._teacher_logits     = None   # list[Tensor] — raw Detect head outputs
         self._teacher_neck_feats = None   # list[Tensor] — neck P3/P4/P5 features
+        self._teacher_boxes      = None   # Tensor — raw box regression outputs [B, 4*reg_max, N]
 
         LOGGER.info(
             f"\n{'='*60}\n"
@@ -294,6 +447,7 @@ class KDTrainer(DetectionTrainer):
             f"  alpha (det)  : {alpha}\n"
             f"  beta  (logit): {beta}\n"
             f"  gamma (feat) : {gamma}\n"
+            f"  delta (box)  : {delta}\n"
             f"  temperature  : {temperature}\n"
             f"{'='*60}\n"
         )
@@ -391,19 +545,31 @@ class KDTrainer(DetectionTrainer):
             if isinstance(m, (nn.BatchNorm2d, nn.SyncBatchNorm))
         ]
 
-    def _setup_train(self, world_size):
+        # ── 5. Replace model.criterion with KD-aware wrapper ─────────────────
+        # Ultralytics 8.x training loop calls model.loss() → model.criterion().
+        # The trainer's criterion() method is never invoked. We must wrap the
+        # model-level criterion to inject KD losses.
+        raw_model = _unwrap_model(self.model)
+        if getattr(raw_model, 'criterion', None) is None:
+            raw_model.criterion = raw_model.init_criterion()
+        raw_model.criterion = _KDCriterionWrapper(raw_model.criterion, trainer=self)
+        LOGGER.info("model.criterion wrapped with _KDCriterionWrapper — KD losses active.")
+
+    def _setup_train(self):
         """
         Called by Ultralytics before training starts.
         Sets up model, dataloaders, optimizer, then initialises KD components.
         """
-        super()._setup_train(world_size)
+        super()._setup_train()
         self._setup_kd()
 
         # Add ChannelAdapter parameters to the optimizer so they are trained
         if self.feat_adapter is not None and self.optimizer is not None:
+            base_lr = self.optimizer.param_groups[0].get('initial_lr', self.optimizer.param_groups[0]['lr'])
             self.optimizer.add_param_group({
                 'params'      : list(self.feat_adapter.parameters()),
-                'lr'          : self.optimizer.param_groups[0]['lr'],
+                'lr'          : base_lr,
+                'initial_lr'  : base_lr,   # required by Ultralytics warmup loop
                 'weight_decay': self.optimizer.param_groups[0].get('weight_decay', 0.0),
             })
             LOGGER.info("ChannelAdapter parameters added to optimizer.")
@@ -421,6 +587,8 @@ class KDTrainer(DetectionTrainer):
                     # Reuse the same lambda as the first param group
                     self.scheduler.lr_lambdas.append(self.scheduler.lr_lambdas[0])
                 LOGGER.info("LR scheduler patched to include ChannelAdapter param group.")
+    
+    
 
     # -------------------------------------------------------------------------
     # Training step hooks
@@ -457,136 +625,42 @@ class KDTrainer(DetectionTrainer):
         with torch.no_grad():
             t_out = self.teacher_model(imgs)
 
-        # Validate output format
-        # In train mode, DetectionModel returns a list of 3 tensors [B, C, H, W]
+        # Ultralytics 8.4.33+: Detect.forward_head() returns a dict
+        #   {'boxes': [B, 4*reg_max, N], 'scores': [B, nc, N], 'feats': [P3, P4, P5]}
+        # where N = total spatial positions across all FPN scales (concatenated).
+        if isinstance(t_out, dict):
+            t_scores = t_out.get('scores')   # [B, nc, N] — class logits, all scales
+            t_feats  = t_out.get('feats')    # list of [B, C, H, W] neck tensors
+
+            if t_scores is None:
+                LOGGER.warning(f"[KD] Teacher output dict missing 'scores' key. Keys: {list(t_out.keys())}. KD skipped.")
+                self._teacher_logits     = None
+                self._teacher_neck_feats = None
+                return batch
+
+            # Store as a single-element list so logit_kd_loss iterates over 1 tensor
+            self._teacher_logits = [t_scores.detach()]
+
+            if self._teacher_extractor is not None and t_feats is not None:
+                self._teacher_neck_feats = [f.detach() for f in t_feats]
+
+            t_boxes = t_out.get('boxes')   # [B, 4*reg_max, N] — box regression logits
+            self._teacher_boxes = t_boxes.detach() if t_boxes is not None else None
+
+            return batch
+
+        # Legacy path: older Ultralytics returned a list of 3 per-scale tensors
         if not isinstance(t_out, (list, tuple)) or len(t_out) < 3:
-            LOGGER.warning(
-                f"[KD] Unexpected teacher output type: {type(t_out)} (len={len(t_out) if hasattr(t_out, '__len__') else 'N/A'}). "
-                f"Expected list of 3 tensors from Detect head in train mode. "
-                f"KD losses will be skipped for this batch."
-            )
+            LOGGER.warning(f"[KD] Unexpected teacher output type: {type(t_out)}. KD skipped.")
             self._teacher_logits     = None
             self._teacher_neck_feats = None
             return batch
 
-        # Cache teacher Detect head outputs (raw logits, not post-processed)
         self._teacher_logits = [t.detach() for t in t_out[:3]]
-
-        # Cache teacher neck features captured by persistent hooks
         if self._teacher_extractor is not None:
             self._teacher_neck_feats = [f.detach() for f in self._teacher_extractor.get_feats()]
 
         return batch
-
-    def criterion(self, preds, batch):
-        """
-        Computes the combined KD training loss.
-
-        Called by Ultralytics INSIDE the AMP autocast context (if amp=True).
-        The student forward (which fires student neck hooks) has already run
-        before this method is called.
-
-        Args:
-            preds : student Detect head output.
-                    Either a list of 3 tensors [B, 4*reg_max+nc, H, W]
-                    or a 2-tuple (y, feats) depending on Ultralytics version.
-            batch : training batch dict
-
-        Returns:
-            (total_loss, loss_items) — Ultralytics expects exactly this format.
-            loss_items is the unmodified detection sub-loss breakdown for logging.
-        """
-        # ── Step 1: Standard YOLO detection loss (box IoU + classification + DFL) ──
-        loss_det, loss_items = super().criterion(preds, batch)
-
-        if self.teacher_model is None or self._teacher_logits is None:
-            return loss_det, loss_items
-
-        # Unwrap preds: newer Ultralytics versions may return (y, feats) tuple
-        if isinstance(preds, tuple):
-            feats = preds[1]
-        elif isinstance(preds, list):
-            feats = preds
-        else:
-            LOGGER.warning(
-                f"[KD] Unexpected preds type: {type(preds)}. "
-                f"Expected list or tuple. KD losses skipped for this batch."
-            )
-            return loss_det, loss_items
-
-        # Validate we have exactly 3 FPN scale outputs for KD
-        if not isinstance(feats, list) or len(feats) < 3:
-            LOGGER.warning(
-                f"[KD] Expected feats to be a list of ≥3 tensors, got "
-                f"{type(feats)} (len={len(feats) if hasattr(feats, '__len__') else 'N/A'}). "
-                f"KD losses skipped for this batch."
-            )
-            return loss_det, loss_items
-
-        kd_loss = torch.tensor(0.0, device=loss_det.device, dtype=loss_det.dtype)
-
-        # ── Step 2: Logit KD loss (KL divergence on class channels only) ─────────
-        if self.kd_beta > 0:
-            # Detect head output: [B, 4*reg_max + nc, H, W]
-            # Split into box regression and class score channels
-            student_detect = _unwrap_model(self.model).model[-1]
-            reg_max = student_detect.reg_max                    # 16 for all YOLOv8 variants
-            nc      = student_detect.nc
-            box_ch  = 4 * reg_max
-
-            teacher_detect  = self.teacher_model.model[-1]
-            teacher_reg_max = teacher_detect.reg_max
-            teacher_nc      = teacher_detect.nc                 # same as nc (validated above)
-            teacher_box_ch  = 4 * teacher_reg_max
-
-            # Class-channel-only tensors: [B, nc, H, W] per scale
-            student_cls = [p.split([box_ch, nc], dim=1)[1] for p in feats]
-            teacher_cls = [
-                t.split([teacher_box_ch, teacher_nc], dim=1)[1]
-                for t in self._teacher_logits
-            ]
-
-            l_logit  = logit_kd_loss(student_cls, teacher_cls, self.kd_temperature)
-            kd_loss  = kd_loss + self.kd_beta * l_logit
-
-        # ── Step 3: Feature KD loss (MSE on L2-normalised neck features) ─────────
-        if (self.kd_gamma > 0
-                and self.feat_adapter       is not None
-                and self._student_extractor is not None
-                and self._teacher_neck_feats is not None):
-
-            # Student neck features captured by persistent hooks during the student
-            # forward pass that just ran (before this criterion call)
-            student_neck_feats = self._student_extractor.get_feats()   # has grad — correct
-            teacher_neck_feats = self._teacher_neck_feats               # detached — correct
-
-            if len(student_neck_feats) == 3 and len(teacher_neck_feats) == 3:
-                # Project student channels to teacher channel space
-                student_adapted = self.feat_adapter(student_neck_feats)
-
-                # Align spatial size if needed (same imgsz → same dims; check for safety)
-                aligned_teacher = []
-                for s_a, t_f in zip(student_adapted, teacher_neck_feats):
-                    if s_a.shape[2:] != t_f.shape[2:]:
-                        t_f = F.interpolate(
-                            t_f, size=s_a.shape[2:], mode='bilinear', align_corners=False
-                        )
-                    aligned_teacher.append(t_f)
-
-                l_feat  = feature_kd_loss(student_adapted, aligned_teacher)
-                kd_loss = kd_loss + self.kd_gamma * l_feat
-
-        # ── Step 4: Combine detection loss and KD losses ──────────────────────────
-        # Ultralytics loss_det is intrinsically scaled by batch_size (sum over batch).
-        # Our kd_loss is computed as a mean over the batch.
-        # We MUST multiply kd_loss by batch_size so the alpha:beta:gamma ratio 
-        # is preserved correctly regardless of the user's batch size setting.
-        batch_size = feats[0].shape[0] if isinstance(feats, list) else 1
-        kd_loss = kd_loss * batch_size
-        
-        total_loss = self.kd_alpha * loss_det + kd_loss
-
-        return total_loss, loss_items
 
     # -------------------------------------------------------------------------
     # Checkpoint saving — detach hooks to avoid pickle errors
