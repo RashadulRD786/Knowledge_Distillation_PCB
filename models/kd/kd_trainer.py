@@ -345,7 +345,10 @@ class _KDCriterionWrapper:
                     if s_a.shape[2:] != t_f.shape[2:]:
                         t_f = F.interpolate(t_f, size=s_a.shape[2:], mode='bilinear', align_corners=False)
                     aligned_teacher.append(t_f)
-                l_feat  = feature_kd_loss(student_adapted, aligned_teacher)
+                l_feat  = feature_kd_loss(
+                    student_adapted, aligned_teacher,
+                    scale_weights=trainer.kd_feat_scale_weights,
+                )
                 kd_loss = kd_loss + trainer.kd_gamma * l_feat
 
         # ── Step 4: Scale KD loss to match detection loss aggregation ─────────
@@ -401,29 +404,36 @@ class KDTrainer(DetectionTrainer):
         gamma: float = 0.1,
         delta: float = 0.0,
         temperature: float = 4.0,
+        feat_scale_weights: list = None,
         cfg=None,
         overrides: dict = None,
         _callbacks=None,
     ):
         """
         Args:
-            teacher_path  : path to the trained teacher .pt checkpoint
-            alpha         : weight for the standard YOLO detection loss (default 0.7)
-            beta          : weight for the logit KD loss / KL divergence (default 0.2)
-            gamma         : weight for the feature KD loss / MSE (default 0.1)
-                            Set to 0.0 to run logit-only KD (no ChannelAdapter needed)
-            temperature   : temperature T for softening predictions (default 4.0)
-            cfg           : Ultralytics config (leave None for defaults)
-            overrides     : dict of training overrides — model, data, epochs, batch, etc.
+            teacher_path       : path to the trained teacher .pt checkpoint
+            alpha              : weight for the standard YOLO detection loss (default 0.7)
+            beta               : weight for the logit KD loss / KL divergence (default 0.2)
+            gamma              : weight for the feature KD loss / MSE (default 0.1)
+                                 Set to 0.0 to run logit-only KD (no ChannelAdapter needed)
+            delta              : weight for box regression KD loss (default 0.0)
+            temperature        : temperature T for softening predictions (default 4.0)
+            feat_scale_weights : per-FPN-scale weights for feature KD [w_P3, w_P4, w_P5].
+                                 None = equal weighting (default).
+                                 Example: [0.6, 0.3, 0.1] upweights P3 to target
+                                 small-object localisation more aggressively.
+            cfg                : Ultralytics config (leave None for defaults)
+            overrides          : dict of training overrides — model, data, epochs, batch, etc.
         """
         super().__init__(cfg=cfg if cfg is not None else DEFAULT_CFG_DICT, overrides=overrides, _callbacks=_callbacks)
 
-        self.teacher_path    = teacher_path
-        self.kd_alpha        = alpha
-        self.kd_beta         = beta
-        self.kd_gamma        = gamma
-        self.kd_delta        = delta
-        self.kd_temperature  = temperature
+        self.teacher_path          = teacher_path
+        self.kd_alpha              = alpha
+        self.kd_beta               = beta
+        self.kd_gamma              = gamma
+        self.kd_delta              = delta
+        self.kd_temperature        = temperature
+        self.kd_feat_scale_weights = feat_scale_weights
 
         # Initialized in _setup_kd() once device is ready
         self.teacher_model       = None
@@ -439,16 +449,21 @@ class KDTrainer(DetectionTrainer):
         self._teacher_neck_feats = None   # list[Tensor] — neck P3/P4/P5 features
         self._teacher_boxes      = None   # Tensor — raw box regression outputs [B, 4*reg_max, N]
 
+        _weights_str = (
+            f"[{', '.join(str(w) for w in feat_scale_weights)}]"
+            if feat_scale_weights is not None else "equal (1/3 each)"
+        )
         LOGGER.info(
             f"\n{'='*60}\n"
             f"  Knowledge Distillation Configuration\n"
             f"{'='*60}\n"
-            f"  Teacher      : {teacher_path}\n"
-            f"  alpha (det)  : {alpha}\n"
-            f"  beta  (logit): {beta}\n"
-            f"  gamma (feat) : {gamma}\n"
-            f"  delta (box)  : {delta}\n"
-            f"  temperature  : {temperature}\n"
+            f"  Teacher           : {teacher_path}\n"
+            f"  alpha (det)       : {alpha}\n"
+            f"  beta  (logit)     : {beta}\n"
+            f"  gamma (feat)      : {gamma}\n"
+            f"  delta (box)       : {delta}\n"
+            f"  temperature       : {temperature}\n"
+            f"  feat_scale_weights: {_weights_str}\n"
             f"{'='*60}\n"
         )
 
