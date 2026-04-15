@@ -99,7 +99,11 @@ def logit_kd_loss(student_cls: list, teacher_cls: list, temperature: float = 4.0
     return total_loss / num_scales
 
 
-def feature_kd_loss(student_feats_adapted: list, teacher_feats: list) -> torch.Tensor:
+def feature_kd_loss(
+    student_feats_adapted: list,
+    teacher_feats: list,
+    scale_weights: list = None,
+) -> torch.Tensor:
     """
     Feature-based Knowledge Distillation Loss (MSE on L2-normalized neck features).
 
@@ -119,14 +123,23 @@ def feature_kd_loss(student_feats_adapted: list, teacher_feats: list) -> torch.T
     Without normalization, feature maps in deeper layers have much larger magnitudes
     than shallow ones. This would cause the P5 (deepest) scale to dominate the loss
     and prevent meaningful gradient signal from reaching P3 (where small defects are
-    best detected). L2 normalization per channel makes each scale contribute equally.
+    best detected). L2 normalization per channel makes each scale contribute equally
+    before any scale weighting is applied.
+
+    Scale weighting (scale_weights):
+    ---------------------------------
+    By default all three FPN scales (P3, P4, P5) contribute equally (mean).
+    Pass scale_weights=[w_P3, w_P4, w_P5] to up-weight P3 — the highest-resolution
+    scale most responsible for small-object detection.  Weights are normalised
+    internally so they do not need to sum to 1.
+    Example: scale_weights=[0.6, 0.3, 0.1]  →  P3 gets 6× more influence than P5.
 
     Math:
     -----
-    s_norm = L2_normalize(s_adapted, dim=1)    # per-channel unit norm
-    t_norm = L2_normalize(t_feat,    dim=1)    # per-channel unit norm
-    L_scale = MSE(s_norm, t_norm.detach())
-    Final loss = mean over all FPN scales.
+    s_norm   = L2_normalize(s_adapted, dim=1)
+    t_norm   = L2_normalize(t_feat,    dim=1)
+    L_i      = MSE(s_norm, t_norm.detach())          per FPN scale i
+    L_feat   = sum(w_i * L_i) / sum(w_i)             weighted combination
 
     Args:
         student_feats_adapted : list of adapted student tensors [P3, P4, P5]
@@ -135,15 +148,34 @@ def feature_kd_loss(student_feats_adapted: list, teacher_feats: list) -> torch.T
         teacher_feats         : list of teacher neck tensors [P3, P4, P5]
                                 Each tensor: [B, teacher_C, H, W]
                                 (should already be detached — no teacher gradients)
+        scale_weights         : optional list of per-scale weights [w_P3, w_P4, w_P5].
+                                If None, all scales are weighted equally (original
+                                behaviour preserved for backward compatibility).
 
     Returns:
-        Scalar loss tensor (mean across all FPN scales)
+        Scalar loss tensor (weighted combination across all FPN scales)
     """
-    total_loss = torch.tensor(0.0, device=student_feats_adapted[0].device,
-                              dtype=student_feats_adapted[0].dtype)
     num_scales = len(student_feats_adapted)
 
-    for s_adapted, t_feat in zip(student_feats_adapted, teacher_feats):
+    # Build normalised weight tensor on the correct device/dtype
+    device = student_feats_adapted[0].device
+    dtype  = student_feats_adapted[0].dtype
+
+    if scale_weights is not None:
+        if len(scale_weights) != num_scales:
+            raise ValueError(
+                f"scale_weights has {len(scale_weights)} entries but there are "
+                f"{num_scales} FPN scales."
+            )
+        w = torch.tensor(scale_weights, device=device, dtype=dtype)
+        w = w / w.sum()   # normalise so weights always sum to 1
+    else:
+        # Equal weighting — identical to original behaviour
+        w = torch.full((num_scales,), 1.0 / num_scales, device=device, dtype=dtype)
+
+    total_loss = torch.tensor(0.0, device=device, dtype=dtype)
+
+    for i, (s_adapted, t_feat) in enumerate(zip(student_feats_adapted, teacher_feats)):
         # Match dtypes — handles AMP float16/float32 mismatch between student and teacher
         t_feat = t_feat.detach().to(dtype=s_adapted.dtype)
 
@@ -155,9 +187,9 @@ def feature_kd_loss(student_feats_adapted: list, teacher_feats: list) -> torch.T
         # Sum over channels (dim=1) so loss is independent of channel count,
         # then average over batch and spatial dims
         scale_loss = F.mse_loss(s_norm, t_norm, reduction='none').sum(dim=1).mean()
-        total_loss = total_loss + scale_loss
+        total_loss = total_loss + w[i] * scale_loss
 
-    return total_loss / num_scales
+    return total_loss
 
 
 def box_kd_loss(student_boxes: torch.Tensor, teacher_boxes: torch.Tensor) -> torch.Tensor:
