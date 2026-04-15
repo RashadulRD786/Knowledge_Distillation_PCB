@@ -118,3 +118,33 @@ events.out.tfevents.*
 
 # Predictions
 predictions*.json
+
+# ==============================
+# LaTeX Build Artifacts
+# ==============================
+
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.fls
+paper/*.fdb_latexmk
+paper/*.synctex.gz
+paper/*.tex
+paper/*.pdf
+paper/*.cls
+paper/*.md
+paper/*.bst
+
+
+
+# ==============================
+# Intermediate Working Directories
+# ==============================
+
+selected_final/
+
+# ==============================
+# Loose Generated Data Files
+# ==============================
+
+Conference-template-A4.pdf
