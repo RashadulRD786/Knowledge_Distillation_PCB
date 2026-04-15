@@ -1,0 +1,14 @@
+path: /home/rashadulnafisriyad/pcb_kd_project/datasets/pku_pcb
+
+train: images/train
+val:   images/val
+test:  images/test
+
+nc: 6
+names:
+  0: missing_hole
+  1: mouse_bite
+  2: open_circuit
+  3: short
+  4: spur
+  5: spurious_copper
