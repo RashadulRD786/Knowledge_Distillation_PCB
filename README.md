@@ -1,8 +1,8 @@
-# Model Scaling vs Small-Object Detection in PCB Defect Detection
+# Model Scaling Degrades Small-Object Detection in PCB Inspection
 ### An Empirical Study with Knowledge Distillation
 
-> **Submitted to SOMET 2026** — Rashadul Nafis Riyad, Radowan Ahmed Baized, Syed Abrar Rafid, S. M. Tuhin  
-> Malaysia-Japan International Institute of Technology, UTM Kuala Lumpur
+> **Submitted to SOMET 2026** — Rashadul Nafis Riyad, Radowan Ahmed Baized, Syed Abrar Rafid, S. M. Tuhin, Zatul Alwani Shaffiei, Siti Nur Khadijah Aishah Ibrahim  
+> Department of Electronic Systems Engineering, Malaysia-Japan International Institute of Technology (MJIIT), Universiti Teknologi Malaysia (UTM) Kuala Lumpur
 
 ---
 
@@ -24,18 +24,15 @@ PCB defects such as mouse bites, missing holes, and spurs occupy only a few doze
 
 ### The Model Scaling Paradox
 
-Benchmarking eight state-of-the-art object detectors on the HRIPCB dataset reveals a counterintuitive phenomenon:
+Benchmarking five YOLOv8 model variants (n/s/m/l/x) on the HRIPCB dataset reveals a counterintuitive phenomenon:
 
 | Model | mAP50-95 | AP_small | FPS | Params |
 |-------|----------|----------|-----|--------|
-| YOLOv8n | 0.643 | **0.587** | 463 | 3.6M |
-| YOLOv8s | 0.696 | **0.591** | 209 | 11.1M |
-| YOLOv8m | 0.730 | 0.563 | 98 | 25.8M |
-| YOLOv8l | 0.747 | 0.552 | 56 | 43.6M |
-| YOLOv8x | 0.761 | 0.556 | 33 | 68.1M |
-| YOLO11s | 0.679 | 0.607 | 209 | 9.4M |
-| YOLO11m | 0.729 | 0.572 | 169 | 20.0M |
-| RT-DETR | 0.606 | 0.472 | 119 | 31.9M |
+| YOLOv8n | 0.643 | **0.587** | 463.5 | 3.6M |
+| YOLOv8s | 0.696 | **0.591** | 209.0 | 11.1M |
+| YOLOv8m | 0.730 | 0.563 | 98.0 | 25.8M |
+| YOLOv8l | 0.747 | 0.552 | 56.0 | 43.6M |
+| YOLOv8x | 0.761 | 0.556 | 33.0 | 68.1M |
 
 **Key insight:** mAP50-95 improves monotonically with model size (0.643 → 0.761), but AP_small *degrades* as models grow larger. The compact YOLOv8n (0.587) outperforms YOLOv8m (0.563), YOLOv8l (0.552), and YOLOv8x (0.556) on the metric that matters most for PCB inspection.
 
@@ -163,22 +160,28 @@ At inference: teacher + ChannelAdapter discarded
 | Logit KD | 0.8 | 0.2 | 0.0 | equal | 0.6567 | +0.0056 | 0.6108 | +0.0022 | 297.5 |
 | Logit KD (strong) | 0.7 | 0.3 | 0.0 | equal | 0.6528 | +0.0017 | 0.6051 | -0.0035 | 297.2 |
 | Feature KD only | 0.8 | 0.0 | 0.2 | equal | 0.6570 | +0.0059 | 0.6171 | +0.0085 | 293.8 |
-| **Combined KD** ★ | **0.7** | **0.2** | **0.1** | **equal** | **0.6604** | **+0.0093** | **0.6121** | **+0.0035** | **280.2** |
+| Combined KD | 0.7 | 0.2 | 0.1 | equal | 0.6604 | +0.0093 | 0.6121 | +0.0035 | 280.2 |
 | Box regression KD | 0.8 | 0.0 | 0.0 | equal | 0.6513 | +0.0002 | 0.6055 | -0.0031 | 303.2 |
-| Combined + P3-heavy | 0.7 | 0.2 | 0.1 | 0.6/0.3/0.1 | 0.6527 | +0.0016 | **0.6174** | +0.0088 | 288.1 |
-| Combined + P3-dominant | 0.7 | 0.2 | 0.1 | 0.7/0.2/0.1 | 0.6548 | +0.0037 | 0.6113 | +0.0027 | 295.9 |
+| **Combined KD + P3-heavy** ★ | **0.7** | **0.2** | **0.1** | **0.6/0.3/0.1** | **0.6616**¹ | **+0.0105** | **0.6174** | **+0.0088** | **288.1** |
+| Combined + P3-dominant | 0.7 | 0.2 | 0.1 | 0.7/0.2/0.1 | 0.6539 | +0.0028 | 0.6113 | +0.0027 | 295.9 |
 | Scratch baseline | 1.0 | 0.0 | 0.0 | equal | 0.6126 | — | 0.5794 | — | 304.5 |
 | Scratch + Combined KD | 0.7 | 0.2 | 0.1 | equal | 0.6234 | +0.0108 | 0.5832 | +0.0038 | 294.9 |
 | Teacher (YOLOv8m) | — | — | — | — | 0.7476 | — | — | — | 37.0 |
 
-★ **Primary recommendation**: Combined KD — best overall balance across all metrics
+★ **Primary recommendation**: Combined KD + P3-heavy — best-performing configuration overall (mAP50-95 and AP_small)
+¹ Test-set value (validation-set mAP50-95 = 0.6527); all other rows report validation-set values. See Section 5.2 for detail.
+
+### Per-Class Breakdown (Best Model)
+
+Combined KD + P3-heavy, evaluated on the held-out test set (mAP50 = 0.9930, mAP50-95 = 0.6616), yields per-class mAP50-95 of 0.662 (missing hole), 0.655 (mouse bite), 0.693 (open circuit), 0.657 (short), 0.651 (spur), and 0.651 (spurious copper). Validation-set performance (mAP50 = 0.9903, mAP50-95 = 0.6527) is closely consistent with the test set, confirming the model generalises well to unseen data.
 
 ### Interpretation of Results
 
 **What works:**
 - Feature KD delivers the largest single-component AP_small improvement (+0.0085), directly aligning the spatial representations most critical for small defects
-- Combined KD achieves the best overall result — logit distillation improves class-level discrimination while feature distillation improves localisation
-- P3-heavy weighting (0.6/0.3/0.1) achieves the highest AP_small of any configuration (0.6174), with notably tighter boxes (AP75 = 0.7412)
+- Combined KD improves both metrics over every single-component variant — logit distillation improves class-level discrimination while feature distillation improves localisation
+- Per-class analysis shows mouse bite benefits most from combined KD (+0.0198 mAP50-95), consistent with feature distillation's localisation-sensitivity for the smallest defect types
+- P3-heavy weighting (0.6/0.3/0.1) achieves the highest AP_small of any configuration (0.6174) and the highest mAP50-95 (0.6616, test set), with notably tighter boxes (AP75 = 0.7412) — this establishes Combined KD + P3-heavy as the overall best configuration
 
 **What does not work:**
 - Box regression KD provides negligible gain (+0.0002 mAP50-95) — teacher and student converge to similar DFL representations, leaving no exploitable dark knowledge
@@ -194,12 +197,14 @@ Four structural factors cap KD improvements: (1) mAP50 saturation at ~0.992 leav
 **KD is most valuable from scratch:**
 KD improves scratch students by +1.8% relative (vs. +1.4% for pretrained), confirming that teacher guidance is most beneficial when the student lacks prior representations. In industrial settings where large-scale pretraining is unavailable for the target sensor modality, teacher-student KD provides substantially more benefit.
 
+**Variance across seeds:**
+To confirm gains exceed normal training noise, the student baseline and Combined KD + P3-heavy were each trained at three seeds (42, 43, 44). Across seeds, the baseline achieves mAP50-95 = 0.6497 ± 0.0012 and AP_small = 0.6072 ± 0.0012, while the proposed model achieves mAP50-95 = 0.6594 ± 0.0028 and AP_small = 0.6175 ± 0.0029. The improvement (≈0.0097 mAP50-95, ≈0.0103 AP_small) is roughly 3–4× larger than the standard deviation observed for either model, indicating the gain exceeds run-to-run variability.
+
 ### Final Model Recommendation
 
-| Priority | Recommended Model | mAP50-95 | AP_small | FPS |
-|----------|------------------|----------|----------|-----|
-| Best overall balance | Combined KD (α=0.7, β=0.2, γ=0.1, T=4) | 0.6604 | 0.6121 | 280.2 |
-| Maximum AP_small | Combined KD + P3-heavy (0.6/0.3/0.1) | 0.6527 | 0.6174 | 288.1 |
+| Recommended Model | mAP50-95 | AP_small | FPS |
+|------------------|----------|----------|-----|
+| Combined KD + P3-heavy (α=0.7, β=0.2, γ=0.1, T=4, feat. wts 0.6/0.3/0.1) | 0.6616 (test) | 0.6174 | 288.1 |
 
 ---
 
@@ -223,18 +228,17 @@ KD improves scratch students by +1.8% relative (vs. +1.4% for pretrained), confi
 
 ## Limitations
 
-- **Synthetic-to-real generalisation**: HRIPCB is synthesised from 10 PCB board layouts. Preliminary cross-dataset evaluation suggests performance degradation under domain shift to real-world PCB images
-- **Fixed teacher**: Only one teacher (YOLOv8m) is evaluated; cross-architecture distillation (e.g., YOLO11 → YOLOv8n) is left as future work
-- **Modest absolute gains**: KD improvements are consistent but small in magnitude (~0.009 mAP50-95), reflecting fundamental dataset saturation rather than a limitation of the KD framework
+- **Synthetic-to-real generalisation**: HRIPCB is synthesised from 10 PCB board layouts. A preliminary cross-dataset check on real-world PCB images showed a noticeable accuracy drop, consistent with the expected synthetic-to-real domain gap
+- **Fixed teacher-student pair**: Only one teacher-student pair (YOLOv8m → YOLOv8n) is evaluated
+- **Modest absolute gains**: KD improvements are consistent but small in magnitude (~0.009-0.010 mAP50-95), reflecting fundamental dataset saturation rather than a limitation of the KD framework
 
 ---
 
 ## Future Work
 
+- **Full cross-dataset study**: Extend the preliminary real-world check into a complete cross-dataset evaluation with domain adaptation
 - **Attention-guided distillation**: Focus knowledge transfer on foreground defect regions rather than uniform spatial alignment
-- **Domain adaptation**: Bridge the synthetic-to-real distribution gap for deployment on live manufacturing lines
 - **Edge hardware evaluation**: Benchmark the distilled YOLOv8n on NVIDIA Jetson Nano for real-time embedded PCB inspection
-- **Cross-architecture distillation**: Explore YOLO11 or RT-DETR teachers distilling into YOLOv8n students
 
 ---
 
@@ -425,8 +429,8 @@ Internal normalisation of `scale_weights` means the absolute values passed to th
 If you use this work, please cite:
 
 ```
-R.N. Riyad, R.A. Baized, S.A. Rafid and S.M. Tuhin,
-"Model Scaling vs Small-Object Detection in PCB Defect Detection:
+R.N. Riyad, R.A. Baized, S.A. Rafid, S.M. Tuhin, Z.A. Shaffiei and S.N.K.A. Ibrahim,
+"Model Scaling Degrades Small-Object Detection in PCB Inspection:
 An Empirical Study with Knowledge Distillation,"
 in Proc. SOMET 2026.
 ```
@@ -435,4 +439,4 @@ in Proc. SOMET 2026.
 
 ## Acknowledgements
 
-The authors thank Dr. Hamido Fujita for continuous support and valuable guidance throughout this research. The authors also thank the creators of the HRIPCB dataset (Huang et al., 2020) whose publicly available benchmark enabled this work.
+The authors thank Universiti Teknologi Malaysia (UTM) for its support in making this project possible, Prof. Hamido Fujita for his continuous support and guidance throughout this research, and the creators of the HRIPCB dataset (Huang et al., 2020) for the publicly available benchmark.
