@@ -30,7 +30,7 @@ OUT_PATH = ROOT / "paper" / "qualitative_results.png"
 WEIGHTS = [
     ("YOLOv8n Baseline",  ROOT / "runs/experiments/baseline/yolov8n/weights/best.pt"),
     ("YOLOv8m Teacher",   ROOT / "runs/experiments/teacher/yolov8m/weights/best.pt"),
-    ("KD Combined (Ours)",ROOT / "runs/experiments/kd/kd_combined/weights/best.pt"),
+    ("KD P3-heavy (Ours)",ROOT / "runs/experiments/kd/kd_combined_p3_heavy/weights/best.pt"),
 ]
 
 # IMAGES format: (display_name, model_class_name, image_path)
@@ -115,10 +115,11 @@ def draw_on_ax(ax, img_bgr, result, model_class_name, display_name):
         )
         ax.add_patch(rect)
 
-        # Show the human-readable display_name, not the model's internal name
+        # Defect type is already shown via the row's y-label, so the
+        # per-box tag only needs the confidence score to stay compact.
         ax.text(
-            x1, max(y1 - 6, 8), f"{display_name} {conf:.2f}",
-            color="white", fontsize=9, fontweight="bold",
+            x1, max(y1 - 6, 40), f"{conf:.2f}",
+            color="white", fontsize=14, fontweight="bold",
             va="bottom",
             bbox=dict(facecolor=color, edgecolor="none",
                       boxstyle="square,pad=0.25", alpha=0.9)
@@ -143,18 +144,18 @@ def main():
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(n_cols * 4, n_rows * 4),
-        gridspec_kw={"wspace": 0.05, "hspace": 0.1}
+        gridspec_kw={"wspace": 0.2, "hspace": 0.12}
     )
 
     # Column titles
     for c, (name, _) in enumerate(models):
-        axes[0, c].set_title(name, fontsize=11, fontweight="bold")
+        axes[0, c].set_title(name, fontsize=16, fontweight="bold")
 
     for r, (display_name, model_class_name, img_path) in enumerate(IMAGES):
         img = cv2.imread(str(img_path))
 
         # Row label shows the human-readable defect name
-        axes[r, 0].set_ylabel(display_name, fontsize=11, fontweight="bold")
+        axes[r, 0].set_ylabel(display_name, fontsize=16, fontweight="bold")
 
         for c, (_, model) in enumerate(models):
             result = model.predict(

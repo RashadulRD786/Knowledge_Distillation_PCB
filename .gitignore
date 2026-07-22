@@ -148,3 +148,16 @@ selected_final/
 # ==============================
 
 Conference-template-A4.pdf
+
+# ==============================
+# Archives / Templates (not pushed)
+# ==============================
+
+*.zip
+paper/Reference template/
+
+# ==============================
+# Project instructions (not pushed)
+# ==============================
+
+CLAUDE.md
